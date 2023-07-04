@@ -1,17 +1,39 @@
 from bs4 import BeautifulSoup
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, Iterable, List, Set
+
 import requests
-from typing import List, Dict
 
 
 BASE_URL = "https://www.vergiliusproject.com"
 
+# Known unreferenced special cases, must be added manually
+UNREFERENCED = {
+    "_PEB_LDR_DATA": ["_LDR_DATA_TABLE_ENTRY"]  # Only references LIST_ENTRY
+}
 
-def choose(prompt: str, options: List[str], suggestions: List[str] = None) -> str:
+
+class Kind(Enum):
+    ENUM = "enum"
+    STRUCT = "struct"
+    UNION = "union"
+
+
+@dataclass(unsafe_hash=True)
+class Type:
+    name: str
+    path: str = field(compare=False)
+    kind: Kind = field(init=False, compare=False)
+    declaration: str = field(init=False, compare=False, repr=False)
+
+
+def choose(prompt: str, options: List[str], suggestions: Iterable[str] = None) -> str:
     # First option is default
     print(f"{prompt} (default: {options[0]}):")
     for i, o in enumerate(options):
         print(f"  {i}) {o}")
-    
+
     if suggestions is not None:
         allowed = [s for s in suggestions if s in options]
         if len(allowed) > 0:
@@ -21,10 +43,11 @@ def choose(prompt: str, options: List[str], suggestions: List[str] = None) -> st
     print()
 
     if choice == "":
-        return options[0]
-    
+        return options[0]  # default
+
     if choice in options:
         return choice
+
     if int(choice) in range(len(options)):
         return options[int(choice)]
 
@@ -38,91 +61,109 @@ def get_website_options(path: str, cls: str) -> Dict[str, str]:
     return {a.text: a["href"] for a in links}
 
 
-def choose_from_website(prompt: str, url: str, cls: str, suggestions: List[str] = None) -> str:
+def choose_from_website(prompt: str, url: str, cls: str) -> str:
     options = get_website_options(url, cls)
-    choice = choose(prompt, list(options), suggestions)
-    return options[choice]
+    choice = choose(prompt, list(options))
+    return choice, options[choice]
 
 
-def get_os(arch: str) -> str:
-    return choose_from_website("Choose OS", f"/kernels/{arch}", "arch-link")
+def choose_os(arch: str) -> str:
+    return choose_from_website("Choose OS", f"/kernels/{arch}", "arch-link")[1]
 
 
-def get_version(os: str) -> str:
-    return choose_from_website("Choose version", os, "fam-link")
+def choose_version(os: str) -> str:
+    return choose_from_website("Choose version", os, "fam-link")[1]
 
 
-def get_type(version: str) -> str:
-    return choose_from_website(
-        "Choose type",
-        version,
-        "list-link",
-        suggestions=["_TEB", "_PEB"]
-    )
+def choose_kernel() -> str:
+    arch = choose("Choose system architecture", ("x64", "x86"))
+    os = choose_os(arch)
+    version = choose_version(os)
+    return version
 
 
-def get_type_declaration(typ: str) -> BeautifulSoup:
-    r = requests.get(f"{BASE_URL}{typ}")
+def get_types(version: str) -> Dict[str, Type]:
+    options = get_website_options(version, "list-link")
+    print(options)
+    return {name: Type(name, path) for name, path in options.items()}
+
+
+def choose_type(types: Dict[str, Type]) -> Type:
+    type_choice = choose("Choose type", list(types), suggestions=["_TEB", "_PEB"])
+    return types[type_choice]
+
+
+def parse_datatype(datatype: Type, all_types: Dict[str, Type]) -> Set[Type]:
+    """
+    Fetch and set the declaration of the provided datatype
+    and find its dependencies (including unreferenced, manually)
+    """
+    r = requests.get(f"{BASE_URL}{datatype.path}")
     soup = BeautifulSoup(r.text, features="lxml")
-    return soup.find(id="copyblock")
+    code = soup.find(id="copyblock")
+
+    declaration = code.text.strip()
+    datatype.declaration = declaration
+    datatype.kind = Kind(declaration.split("\n")[1].split()[0])
+
+    type_references = code.find_all("a", class_="str-link")
+    dependencies = set()
+    for ref in type_references:
+        dependencies.add(all_types[ref.text.strip()])
+
+    # Manually add known unreferenced dependencies
+    for ref in UNREFERENCED.get(datatype.name, []):
+        dependencies.add(all_types[ref])
+
+    return dependencies
 
 
-def get_type_declarations(base_type: str) -> List[str]:
-    # Fetch code for chosen base type and all dependencies recursively
-    type_declarations = []
-    processed = {}
-    remaining = {base_type.split("/")[-1]: base_type}
-    ldr_data_table_entry = False
+def process_type(base_type: Type, all_types: List[Type]) -> Set[Type]:
+    """
+    Process type and dependencies recursively
+    until no references are unhandled
+    """
+    remaining = {base_type}
+    processed = set()
 
     nprocessed = 0
     while len(remaining) > 0:
-        type_name, type_path = remaining.popitem()
-        print(f"{'=' * 80}\nPROCESSING {type_name}\n{'=' * 80}")
-        processed[type_name] = type_path
-        type_decl = get_type_declaration(type_path)
-        type_declarations.append(type_decl.text)
-
-        type_paths = type_decl.find_all("a", class_="str-link")
-        dependencies = {link.text.strip(): link["href"] for link in type_paths}
-        print(f"Dependencies: {list(dependencies)}\n")
-
-        # _LDR_DATA_TABLE_ENTRY is often not referenced, but is needed for _LIST_ENTRY
-        if "_LIST_ENTRY" in dependencies and not ldr_data_table_entry:
-            path = get_website_options(
-                "/".join(type_path.split("/")[:-1]),
-                "list-link"
-            )["_LDR_DATA_TABLE_ENTRY"]
-            dependencies["_LDR_DATA_TABLE_ENTRY"] = path
-            ldr_data_table_entry = True
-
-        # Only add not yet processed dependencies for handling
-        remaining |= {dep: path for dep, path in dependencies.items() if dep not in processed}
+        datatype: Type = remaining.pop()
+        print(f"Processing {datatype.name}...")
+        processed.add(datatype)
+        dependencies = parse_datatype(datatype, all_types)
         nprocessed += 1
-        
-        print(f"Processed: {list(processed)}")
-        print(f"Remaining: {list(remaining)}\n")
 
-    print(f"\nFetched a total of {nprocessed} new types")
+        # Only add unprocessed dependencies for handling
+        remaining |= dependencies - processed
 
-    return type_declarations
+    print(f"\nFetched a total of {nprocessed} types\n")
+
+    return processed
 
 
-def write_header_file(filename: str, types: List[str]) -> None:
-    types.insert(0, "typedef void VOID;")
-    header = "\n\n".join(types)
+def write_header_file(filename: str, types: Iterable[Type]) -> None:
     with open(filename, "w") as f:
-        f.write(header)
+        f.write("typedef void VOID;\n")
+
+        # Write typedefs for all types to avoid ordering and cyclic issues
+        for t in types:
+            f.write(f"typedef {t.kind.value} {t.name} {t.name};\n")
+
+        for t in types:
+            f.write(f"\n\n{t.declaration}")
 
 
 def main():
-    arch = choose("Choose system architecture", ("x64", "x86"))
-    os = get_os(arch)
-    version = get_version(os)
-    typ = get_type(version)
-    types = get_type_declarations(typ)
-    suggested_filename = f"{typ.split('/')[-1].lower().strip('_')}.h"
-    filename = input(f"Output file (default: {suggested_filename})\n> ") or suggested_filename
-    write_header_file(filename, types)
+    kernel_version = choose_kernel()
+    all_types = get_types(kernel_version)
+    base_type = choose_type(all_types)
+    processed_types = process_type(base_type, all_types)
+
+    suggested_filename = f"{base_type.name.strip('_').lower()}.h"
+    print(f"Output file (default: {suggested_filename})")
+    filename = input("> ") or suggested_filename
+    write_header_file(filename, processed_types)
 
 
 if __name__ == "__main__":
