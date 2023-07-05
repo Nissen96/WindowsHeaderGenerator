@@ -7,7 +7,7 @@
 The script runs interactively and fetches all available types for the provided kernel version, from which you choose one to generate a header file for. The code for this type is downloaded together with all dependencies recursively until all external types are resolved and a single standalone header file for the provided type is written.
 
 <p align="center">
-  <img width="800" alt="Example usage: fetching the TEB struct" src="https://s12.gifyu.com/images/SQP2u.gif">
+  <img width="500" alt="Example usage: fetching the TEB struct" src="https://s12.gifyu.com/images/SW2v0.gif">
   <br>
   <em>Generating a header file for the Process Environment Block</em>
 </p>
