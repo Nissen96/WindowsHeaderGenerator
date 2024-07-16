@@ -84,7 +84,6 @@ def choose_kernel() -> str:
 
 def get_types(version: str) -> Dict[str, Type]:
     options = get_website_options(version, "list-link")
-    print(options)
     return {name: Type(name, path) for name, path in options.items()}
 
 
