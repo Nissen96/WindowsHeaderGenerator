@@ -49,6 +49,8 @@ def choose(prompt: str, options: List[str], suggestions: Iterable[str] = None) -
 
     if choice in options:
         return choice
+    elif choice+'new' in options:
+        return choice+'new'
 
     if int(choice) in range(len(options)):
         return options[int(choice)]
@@ -110,7 +112,12 @@ def parse_datatype(datatype: Type, all_types: Dict[str, Type]) -> Set[Type]:
     type_references = code.find_all("a", class_="str-link")
     dependencies = set()
     for ref in type_references:
-        dependencies.add(all_types[ref.text.strip()])
+        type_name = ref.text.strip()
+        if type_name in all_types:
+            dependencies.add(all_types[type_name])
+        elif type_name+'new' in all_types:
+            type_name += 'new'
+            dependencies.add(all_types[type_name])
 
     # Manually add known unreferenced dependencies
     for ref in UNREFERENCED.get(datatype.name, []):
@@ -152,7 +159,8 @@ def write_header_file(filename: str, types: Iterable[Type]) -> None:
             f.write(f"typedef {t.kind.value} {t.name} {t.name};\n")
 
         for t in types:
-            f.write(f"\n\n{t.declaration}")
+            decl = t.declaration.replace('unionvolatile', 'volatile union')
+            f.write(f"\n\n{decl}")
 
 
 def main():
